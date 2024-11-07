@@ -20,7 +20,7 @@ class forwarding_table_entry(object):
 class Packet_queue(object):
     class Entry(object):
         def __init__(self, packet, table_entry, last_request_time, request_nums = 0):
-            self.packet = packet
+            self.packets = [packet]
             self.last_request_time = last_request_time
             self.request_nums = request_nums
             self.table_entry = table_entry
@@ -31,7 +31,7 @@ class Packet_queue(object):
         flag = 0
         for entry in self.lst:
             entry:Packet_queue.Entry
-            if entry.packet == packet:
+            if packet in entry.packets:
                 flag = 1
                 if entry.request_nums < 5 and time.time() - entry.last_request_time >= 1:
                     taget_ip = table_entry.next_ip if table_entry.next_ip else packet[IPv4].dst
@@ -43,15 +43,18 @@ class Packet_queue(object):
                     arp_request = Ethernet(src=table_entry.target.ethaddr,
                                             dst="ff:ff:ff:ff:ff:ff",
                                             ethertype=EtherType.ARP) + arp
-                    net.send_packet(table_entry.target, arp_request)
+                    net.send_packet(table_entry.target.name, arp_request)
                     entry.last_request_time = time.time()
                     entry.request_nums += 1
                 elif entry.request_nums >= 5:
                     self.lst.remove(entry)
+            elif packet[IPv4].dst == entry.packets[0][IPv4].dst:
+                flag = 1
+                entry.packets.append(packet)
         if flag == 0:
             new_entry = self.Entry(packet, table_entry, time.time(), 0)
             self.lst.append(new_entry)
-            self.handle(new_entry.packet, new_entry.table_entry, net)
+            self.handle(new_entry.packets[0], new_entry.table_entry, net)
 
 
 packet_queue = Packet_queue()
@@ -120,8 +123,8 @@ class Router(object):
 
         arp = packet.get_header(Arp)
         if arp:
-            self.arp_table[arp.senderprotoaddr] = arp.senderhwaddr
             if arp.operation == 1:
+                self.arp_table[arp.senderprotoaddr] = arp.senderhwaddr
                 log_info("arp request")
                 flag = 0
                 for i in range(len(self.ips)):
@@ -136,6 +139,8 @@ class Router(object):
                     log_info("target not found")
             elif arp.operation == 2:
                 log_info("arp reply")
+                if arp.senderhwaddr != "ff:ff:ff:ff:ff:ff":
+                    self.arp_table[arp.senderprotoaddr] = arp.senderhwaddr
                 self.arp_table[arp.targetprotoaddr] = arp.targethwaddr
             for key in self.arp_table.keys():
                 print(key, self.arp_table[key])
@@ -147,21 +152,28 @@ class Router(object):
         while True:
             entry_tobe_remove = None
             for que_entry in packet_queue.lst:
-                head: IPv4 = que_entry.packet.get_header(IPv4)
-                entry = que_entry.table_entry
-                if not entry.next_ip:
-                    next_ip = head.dst
-                else:
-                    next_ip = entry.next_ip
-                if next_ip in self.arp_table.keys():
-                    next_mac = self.arp_table[next_ip]
-                    eth_header = que_entry.packet.get_header(Ethernet)
-                    eth_header.src = entry.target.ethaddr
-                    eth_header.dst = next_mac
-                    self.net.send_packet(entry.target, que_entry.packet)
-                    entry_tobe_remove = que_entry
-                else:
-                    packet_queue.handle(que_entry.packet, entry, self.net)
+                packet_tobe_remove = None
+                for packet in que_entry.packets:
+                    head: IPv4 = packet.get_header(IPv4)
+                    entry = que_entry.table_entry
+                    if not entry.next_ip:
+                        next_ip = head.dst
+                    else:
+                        next_ip = entry.next_ip
+                    if next_ip in self.arp_table.keys():
+                        next_mac = self.arp_table[next_ip]
+                        eth_header = packet.get_header(Ethernet)
+                        eth_header.src = entry.target.ethaddr
+                        eth_header.dst = next_mac
+                        self.net.send_packet(entry.target, packet)
+                        packet_tobe_remove = packet
+                    else:
+                        packet_queue.handle(packet, entry, self.net)
+                if packet_tobe_remove:
+                    que_entry.packets.remove(packet_tobe_remove)
+                    if len(que_entry.packets) == 0:
+                        entry_tobe_remove = que_entry
+                        break
             if entry_tobe_remove:
                 packet_queue.lst.remove(entry_tobe_remove)
             try:
